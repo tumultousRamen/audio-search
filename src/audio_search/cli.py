@@ -31,7 +31,7 @@ def health(base: str = DEFAULT_BASE):
 
 @app.command()
 def ingest(
-    dataset: str = typer.Option(..., "--dataset", "-d", help="commonvoice | librispeech"),
+    dataset: str = typer.Option(..., "--dataset", "-d", help="librispeech | fleurs | esc50"),
     limit: int = typer.Option(500, "--limit", "-n"),
     batch_size: int = typer.Option(32, "--batch-size", "-b"),
     resume: bool = typer.Option(False, "--resume"),

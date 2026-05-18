@@ -16,6 +16,7 @@ from rich.progress import (
 )
 
 from audio_search.adapters.base import Clip, DatasetAdapter
+from audio_search.adapters.esc50 import ESC50Adapter
 from audio_search.adapters.fleurs import FleursAdapter
 from audio_search.adapters.librispeech import LibriSpeechAdapter
 from audio_search.config import get_settings
@@ -27,6 +28,7 @@ console = Console()
 
 
 ADAPTERS: dict[str, type[DatasetAdapter]] = {
+    "esc50": ESC50Adapter,
     "fleurs": FleursAdapter,
     "librispeech": LibriSpeechAdapter,
 }

@@ -67,7 +67,7 @@ class SearchByAudioResponse(BaseModel):
 
 
 class IngestRequest(BaseModel):
-    dataset: Literal["librispeech", "fleurs"]
+    dataset: Literal["librispeech", "fleurs", "esc50"]
     limit: int | None = None
     batch_size: int = 32
     resume: bool = False
@@ -111,7 +111,7 @@ def search_endpoint(
     q: str = Query(..., min_length=1),
     k: int = Query(10, ge=1, le=100),
     sources: str = Query("text,audio,bm25", description="comma-separated subset of text,audio,bm25"),
-    source_filter: str | None = Query(None, description="filter by clip source: commonvoice|librispeech|audiocaps"),
+    source_filter: str | None = Query(None, description="filter by clip source: librispeech|fleurs|esc50"),
 ):
     src_list = [s.strip() for s in sources.split(",") if s.strip()]
     bad = [s for s in src_list if s not in ALL_SOURCES]
