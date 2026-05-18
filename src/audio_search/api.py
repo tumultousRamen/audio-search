@@ -160,6 +160,39 @@ def eval_endpoint(req: EvalRequest):
     return run_full_eval(n_auto=req.n_auto, seed=req.seed, configs=cfgs)
 
 
+class ClipSummary(BaseModel):
+    id: str
+    transcript: str
+    speaker_id: str
+    accent: str
+    gender: str
+    source: str
+    lang: str
+    duration_s: float
+    audio_path: str
+
+
+class ClipsListResponse(BaseModel):
+    clips: list[ClipSummary]
+    next_cursor: str | None
+    limit: int
+    total: int
+
+
+@app.get("/clips", response_model=ClipsListResponse)
+def list_clips_endpoint(
+    limit: int = Query(20, ge=1, le=200, description="page size"),
+    cursor: str | None = Query(None, description="opaque cursor = last id of previous page"),
+    source: str | None = Query(None, description="filter: commonvoice | librispeech | fleurs | audiocaps"),
+):
+    """Cursor-paginated browse of indexed clips, ordered by id ascending.
+
+    Pass `next_cursor` from the response as `cursor` in the next request.
+    A null `next_cursor` indicates the end of the listing.
+    """
+    return list_clips(limit=limit, cursor=cursor, source_filter=source)
+
+
 @app.get("/clip/{clip_id}")
 def clip_endpoint(clip_id: str, play: int = Query(0, description="if 1, stream the wav file")):
     from audio_search.index import get_by_id

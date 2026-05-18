@@ -179,20 +179,47 @@ flowchart LR
 |---|---|---|
 | `GET` | `/health` | model load status, table sizes |
 | `POST` | `/ingest` | `{dataset, limit, batch_size, resume, skip_audio}` |
+| `GET` | `/clips` | `?limit=20&cursor=<last_id>&source=` — cursor-paginated browse, id-ordered |
 | `GET` | `/search` | `?q=&k=10&sources=text,audio,bm25&source_filter=` |
 | `POST` | `/search-by-audio` | audio-to-audio (CLAP over input waveform) |
 | `POST` | `/eval` | runs probes × configs, writes `eval/results.json` |
 | `GET` | `/clip/{id}` | metadata + transcript + audio_path; `?play=1` streams the wav |
 
-CLI examples:
+### Pagination contract
+
+`/clips` returns `{ clips, next_cursor, limit, total }`. Cursor is the last `id` of the current page. To paginate:
 
 ```bash
-audio-search health
-audio-search ingest --dataset librispeech --limit 200
-audio-search search "joining the military" --k 5
-audio-search search-by-audio data/librispeech_audio/ls_xxx.wav --k 5
-audio-search eval --n 100
+# page 1
+curl 'http://localhost:8000/clips?limit=20'
+# { "clips": [...], "next_cursor": "ls_1462_170138_1462-170138-0014", ... }
+
+# page 2 — pass next_cursor back as cursor
+curl 'http://localhost:8000/clips?limit=20&cursor=ls_1462_170138_1462-170138-0014'
+
+# end of listing → next_cursor is null
 ```
+
+CLI examples (the CLI is a **thin HTTP client** — the FastAPI service must be running on `:8000` first, and every command is invoked via `uv run` so it resolves the project venv):
+
+```bash
+# terminal 1 — long-running service (warms encoders on startup)
+uv run uvicorn audio_search.api:app --port 8000
+
+# terminal 2 — issue commands via the CLI client
+uv run audio-search health
+uv run audio-search ingest --dataset librispeech --limit 200
+uv run audio-search list --limit 20                            # browse page 1
+uv run audio-search list --limit 20 --cursor <last_id>         # next page
+uv run audio-search list --auto                                # interactive walk
+uv run audio-search search "joining the military" --k 5
+uv run audio-search search "joining the military" --sources text          # baseline only
+uv run audio-search search "joining the military" --sources text,bm25     # no CLAP
+uv run audio-search search-by-audio data/librispeech_audio/ls_xxx.wav --k 5
+uv run audio-search eval --n 100
+```
+
+> Running `audio-search` without the `uv run` prefix only works inside an activated venv (`source .venv/bin/activate`). `uv run` is the friction-free path.
 
 ---
 
@@ -266,12 +293,13 @@ In rough priority order if we had another day:
 
 1. **Replace naive RRF with a cascade**: text-dense → top-100 → BM25 re-rank → top-30 → CLAP audio re-rank → top-10. Lets each source do what it's good at.
 2. **Tune RRF weights / k per source** with a small held-out probe set. Either weighted RRF or per-source k.
-3. **Add ECAPA-TDNN speaker embeddings** as a fourth retrieval source for speaker / accent queries that transcripts cannot represent.
-4. **Real queue-based ingestion** (Pub/Sub → Beam/Klio shape — Spotify's pattern). Replace the sync `for` loop without touching consumers.
-5. **AudioCaps subset + non-speech probes.** CLAP earns its slot on non-speech; without it the audio source looks bad on this benchmark.
-6. **LLM-as-judge** for paraphrase queries with multi-relevant gold (Recall@k is a binary; nDCG@k with graded judgments is more informative).
-7. **Embedding versioning + drift monitor.** Tag every vector with `(model_id, model_version)`; track top-K cosine distribution against a baseline; alert on > 2 σ drift.
-8. **Audio fingerprint dedup** before embedding (Spotify-style topological / neural fingerprints) — at corpus scales > 10⁵ the dedup pass dominates ingestion cost.
+3. **Multilingual retrieval.** The current text encoder (`bge-small-en-v1.5`) is **English-only**, so an English query against the Hindi/Japanese FLEURS slices would fail at both the dense and BM25 stages. Drop-in upgrade path: swap to a multilingual encoder of the same dimension — `intfloat/multilingual-e5-small` (384-dim, 100+ langs, MTEB-competitive) or Meta `SONAR` (1024-dim, joint speech-text across 200+ langs, also gives a speech-side embedding for free). Requires re-ingesting since the vector space changes. Once shipped, a query in any language could retrieve cross-lingual audio via the shared semantic space.
+4. **Add ECAPA-TDNN speaker embeddings** as a fourth retrieval source for speaker / accent queries that transcripts cannot represent.
+5. **Real queue-based ingestion** (Pub/Sub → Beam/Klio shape — Spotify's pattern). Replace the sync `for` loop without touching consumers.
+6. **AudioCaps subset + non-speech probes.** CLAP earns its slot on non-speech; without it the audio source looks bad on this benchmark.
+7. **LLM-as-judge** for paraphrase queries with multi-relevant gold (Recall@k is a binary; nDCG@k with graded judgments is more informative).
+8. **Embedding versioning + drift monitor.** Tag every vector with `(model_id, model_version)`; track top-K cosine distribution against a baseline; alert on > 2 σ drift.
+9. **Audio fingerprint dedup** before embedding (Spotify-style topological / neural fingerprints) — at corpus scales > 10⁵ the dedup pass dominates ingestion cost.
 
 ---
 
@@ -318,14 +346,16 @@ uv sync                                       # installs Python 3.12 + deps
 # (optional) HF token for any gated dataset later
 uv run hf auth login
 
-# start the service
+# start the service (terminal 1 — keep running; first start downloads encoder weights)
 uv run uvicorn audio_search.api:app --port 8000
 
-# ingest, search, eval
-audio-search ingest --dataset librispeech --limit 200
-audio-search search "joining the military" --k 5
-audio-search eval --n 100
+# ingest, search, eval (terminal 2 — every CLI call hits the service over :8000)
+uv run audio-search ingest --dataset librispeech --limit 200
+uv run audio-search search "joining the military" --k 5
+uv run audio-search eval --n 100
 ```
+
+> **Two-terminal model.** `uv run audio-search …` is a thin Typer wrapper around `httpx` — it expects the FastAPI service from the first command to be alive at `http://localhost:8000`. If you see `ConnectionRefusedError`, the server is not running. The CLI never loads models directly.
 
 Tests:
 

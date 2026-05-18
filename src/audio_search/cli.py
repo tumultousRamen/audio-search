@@ -81,6 +81,71 @@ def search_by_audio(
     _render_hits_audio(data)
 
 
+@app.command("list")
+def list_cmd(
+    limit: int = typer.Option(20, "--limit", "-n", min=1, max=200, help="page size"),
+    cursor: Optional[str] = typer.Option(None, "--cursor", "-c", help="opaque cursor from previous page"),
+    source: Optional[str] = typer.Option(None, "--source", "-s", help="filter: librispeech | fleurs | ..."),
+    auto: bool = typer.Option(False, "--auto", help="auto-paginate through all pages (press enter between pages)"),
+    base: str = DEFAULT_BASE,
+):
+    """Browse indexed clips with cursor-based pagination.
+
+    Examples:
+      audio-search list --limit 10                    # first page
+      audio-search list --limit 10 --cursor ls_xxx    # next page
+      audio-search list --auto                        # interactive walk
+    """
+    with _client(base) as c:
+        next_cursor = cursor
+        page_no = 0
+        while True:
+            page_no += 1
+            params: dict = {"limit": limit}
+            if next_cursor:
+                params["cursor"] = next_cursor
+            if source:
+                params["source"] = source
+            r = c.get("/clips", params=params)
+            r.raise_for_status()
+            data = r.json()
+            _render_clips_page(data, page_no)
+            next_cursor = data.get("next_cursor")
+            if not next_cursor:
+                console.print("[dim]— end of listing —[/dim]")
+                break
+            if not auto:
+                console.print(f"[dim]next cursor:[/dim] [bold]{next_cursor}[/bold]")
+                break
+            try:
+                input("press enter for next page (Ctrl+C to stop)…  ")
+            except (KeyboardInterrupt, EOFError):
+                console.print()
+                break
+
+
+def _render_clips_page(data: dict, page_no: int) -> None:
+    n = len(data["clips"])
+    total = data.get("total", "?")
+    console.print(f"[dim]page[/dim] {page_no}   [dim]rows[/dim] {n}/{total}   "
+                  f"[dim]cursor[/dim] {'-' if not data.get('next_cursor') else data['next_cursor']}")
+    tbl = Table(show_lines=False)
+    tbl.add_column("id")
+    tbl.add_column("src")
+    tbl.add_column("spk")
+    tbl.add_column("dur", justify="right")
+    tbl.add_column("transcript", overflow="fold")
+    for c in data["clips"]:
+        tbl.add_row(
+            c["id"],
+            c.get("source", ""),
+            c.get("speaker_id", "")[:10],
+            f"{c.get('duration_s', 0.0):.1f}s",
+            c.get("transcript", ""),
+        )
+    console.print(tbl)
+
+
 @app.command()
 def eval(
     n_auto: int = typer.Option(200, "--n", help="number of auto-generated probes"),
