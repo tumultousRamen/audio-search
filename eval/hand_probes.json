@@ -1,0 +1,72 @@
+[
+  {
+    "qid": "hand_substring_oysters",
+    "query": "oysters or clams",
+    "gold_ids": ["ls_652_130737_652-130737-0000"],
+    "source": "librispeech",
+    "note": "exact substring — BM25 should ace; tests baseline correctness"
+  },
+  {
+    "qid": "hand_paraphrase_drinks",
+    "query": "what to avoid drinking with seafood",
+    "gold_ids": ["ls_652_130737_652-130737-0000"],
+    "source": "librispeech",
+    "note": "paraphrase of the oysters/whisky line — text embedding should beat BM25 (no shared keywords)"
+  },
+  {
+    "qid": "hand_paraphrase_army",
+    "query": "joining the military",
+    "gold_ids": ["ls_1988_24833_1988-24833-0026"],
+    "source": "librispeech",
+    "note": "paraphrase of 'enlist in the army' — text embedding semantic match"
+  },
+  {
+    "qid": "hand_substring_rider",
+    "query": "experienced rider",
+    "gold_ids": ["ls_6313_66129_6313-66129-0028"],
+    "source": "librispeech",
+    "note": "exact substring — should be R@1 for both text and BM25"
+  },
+  {
+    "qid": "hand_topical_wine",
+    "query": "wine quality and vintage years",
+    "gold_ids": ["ls_652_130737_652-130737-0011"],
+    "source": "librispeech",
+    "note": "topical, partial overlap — both should fire"
+  },
+  {
+    "qid": "hand_semantic_marriage",
+    "query": "a wife destroyed by her husband's passions",
+    "gold_ids": ["ls_174_84280_174-84280-0015"],
+    "source": "librispeech",
+    "note": "semantic — paraphrases 'destroyed by the undisciplined passions of her husband'"
+  },
+  {
+    "qid": "hand_semantic_decline",
+    "query": "decline of a powerful society over centuries",
+    "gold_ids": ["ls_2902_9006_2902-9006-0017"],
+    "source": "librispeech",
+    "note": "abstract semantic — paraphrases 'climate bad example and the luxury of power degraded them in one century'"
+  },
+  {
+    "qid": "hand_semantic_doctor",
+    "query": "a physician administers medicine to an elderly patient",
+    "gold_ids": ["ls_84_121123_84-121123-0004"],
+    "source": "librispeech",
+    "note": "semantic — 'd'avrigny rushed towards the old man and made him inhale a powerful restorative'"
+  },
+  {
+    "qid": "hand_semantic_travel",
+    "query": "wandering nomadic existence",
+    "gold_ids": ["ls_5694_64029_5694-64029-0000"],
+    "source": "librispeech",
+    "note": "semantic — paraphrases 'we were on the tramp again'"
+  },
+  {
+    "qid": "hand_substring_vanity",
+    "query": "flattering to my vanity",
+    "gold_ids": ["ls_3170_137482_3170-137482-0044"],
+    "source": "librispeech",
+    "note": "exact substring control"
+  }
+]
