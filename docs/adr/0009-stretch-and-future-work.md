@@ -1,33 +1,40 @@
 # ADR 0009 — Stretch goals and future-work directions
 
-**Status:** Accepted · 2026-05-18
+**Status:** Accepted · 2026-05-18 (revised — audio-to-audio + ESC-50 shipped; AudioCaps still deferred)
 
-## Stretch goals (commit only after end-to-end green)
+## Stretch goals — status
 
-| Stretch | Effort | Gating |
+| Stretch | Status | Evidence |
 |---|---|---|
-| **Audio-to-audio search** (`/search-by-audio`) | ~20 LOC — embed input audio with CLAP, query `clips_audio`, return top-k | Free with current schema; deferred only until E2E demo passes a smoke run |
-| **AudioCaps subset (300 clips)** | ~30 min — new adapter, captions stored in `caption` attribute (not `transcript`), retrieved via the same RRF path | Gated on hour-4 buffer; tests CLAP on non-speech content |
+| **Audio-to-audio search** (`/search-by-audio`) | **✓ Shipped + verified** | 30/30 same-class retrieval on six ESC-50 query classes; cross-corpus separation verified (LS query → LS results only); 50–120 ms warm round-trip on MPS. See README "Audio-to-audio" section. |
+| **ESC-50 non-speech corpus** | **✓ Shipped** | 2 000 clips, 50 classes, ingested via new `ESC50Adapter`. Class name doubles as transcript so all three rankers fire. Lets CLAP demonstrate clean cluster behaviour at demo time. |
+| **AudioCaps subset (300 clips)** | Deferred | ~30 min — new adapter, captions stored as transcript (descriptive sentences, unlike ESC-50 class labels), retrieved via the same RRF path. Would isolate CLAP's text-to-audio contribution that ESC-50's class-name transcripts shortcut around. |
+| **Ablate-transcripts experiment on ESC-50** | Deferred | ~5 min code + ~90 s re-ingest. Stash transcripts before, restore after. Forces CLAP's text-tower to carry retrieval without bge / BM25 shortcut → cleanest measurement of joint-space cross-modal lift. |
 
 ## Future work — what we'd build with more time
 
 ### Pipeline scale-out
 
-Replace `for batch in ...` with a real DAG runner.
+Replace `for batch in ...` with a queue + worker pool. Current ingest is sync + single-process; at ≥10⁴ clips it saturates CLAP on one MPS device.
+
+Two candidate substrates, both swap-in-place via env var (no producer/consumer code changes):
+
+- **Redis Streams** — single Docker container, `XREADGROUP` for consumer groups, `XACK` for at-least-once, `XPENDING` + `XCLAIM` for crash recovery, second stream for DLQ. ~150 LOC. Lowest-friction local setup; matches Discord / GitLab production patterns.
+- **GCP Pub/Sub Emulator** — matches Spotify Klio (cited above), `gcloud beta emulators pubsub` to run locally, same `google-cloud-pubsub` Python client as prod. ~250 LOC. Highest production-fidelity story.
 
 ```mermaid
 flowchart LR
-    S3[(object storage)] -->|new-clip event| Q[(Pub/Sub)]
+    S3[(object storage)] -->|new-clip event| Q[(Redis Streams<br/>or Pub/Sub)]
     Q --> W1[worker: load + resample]
     W1 --> W2[worker: VAD + chunk]
     W2 --> W3a[worker: bge-small batch]
     W2 --> W3b[worker: CLAP batch]
-    W3a --> U[(tpuf clips_text)]
-    W3b --> U2[(tpuf clips_audio)]
-    W1 -.failure.-> DLQ[(dead-letter queue)]
+    W3a --> U[(LanceDB clips_text)]
+    W3b --> U2[(LanceDB clips_audio)]
+    W1 -.failure.-> DLQ[(dead-letter stream)]
 ```
 
-Concrete picks: Prefect or Dagster for the DAG, Ray Data for embedding parallelism, a DLQ for un-embeddable inputs.
+Concrete picks for the wider DAG: Prefect or Dagster for orchestration, Ray Data for embedding parallelism, a DLQ stream for un-embeddable inputs, idempotent `merge_insert` on `clip_id` for safe redelivery.
 
 ### Retrieval upgrades
 
@@ -49,4 +56,5 @@ Concrete picks: Prefect or Dagster for the DAG, Ray Data for embedding paralleli
 
 - **Embedding-versioning.** Treat embeddings as data; tag every vector with `(model_id, model_version)`; never mix versions in one namespace. Catches the "v1 vs v2 cosines are not comparable" failure mode.
 - **Neural audio fingerprint dedup** before embedding — at scale, near-duplicates dominate batch-embed cost.
-- **Filtered ANN** for multi-tenancy (`where org_id = ...`); turbopuffer supports server-side filters today.
+- **Filtered ANN** for multi-tenancy (`where org_id = ...`); LanceDB supports server-side scalar filters today (`_where_to_sql` in `index.py`).
+- **Multilingual text encoder swap.** `bge-small-en-v1.5` is English-only; cross-lingual retrieval over FLEURS hi/de/ja requires `intfloat/multilingual-e5-small` (drop-in same dimension) or Meta `SONAR` (1024-dim, joint speech-text across 200+ languages). Re-ingest required since the vector space changes.

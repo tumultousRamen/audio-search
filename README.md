@@ -1,8 +1,11 @@
 # audio-search
 
-Hybrid text + audio embedding retrieval over speech datasets, with a transcript-as-gold evaluation harness.
+Hybrid text + audio embedding retrieval over speech **and** environmental-sound datasets, with a transcript-as-gold evaluation harness.
 
-> **TL;DR.** Speech-first retrieval over LibriSpeech (and FLEURS in the same shape). Three retrieval sources — `bge-small` over transcripts, CLAP over waveforms, BM25 over the transcript text — fused via Reciprocal Rank Fusion. Eval against 110 transcript-as-gold probes shows the **headline result that naive 3-way RRF underperforms text-only on this corpus**: the audio source is uncorrelated with text-substring queries and drags R@1 from 0.81 to 0.10. The interesting design lesson is content-dependent fusion, not a single best stack.
+> **TL;DR.** Mixed-content retrieval over LibriSpeech (clean read speech) and ESC-50 (50-class environmental sound). Three retrieval sources — `bge-small` over transcripts, CLAP over waveforms, BM25 over the transcript text — fused via Reciprocal Rank Fusion. Two design lessons surface from 120 transcript-as-gold probes:
+>
+> 1. **Naive equal-weighted 3-way RRF underperforms text-only on speech** — CLAP is uncorrelated with text-substring queries and drags R@1 from 0.72 to 0.40. The fix is content-dependent fusion, not a single best stack.
+> 2. **Audio-to-audio search works end-to-end on the same `clips_audio` index.** 30/30 same-class retrieval across six ESC-50 query classes, ~50-120 ms warm latency. CLAP earns its slot when the query *is* audio, not text. The PRD's "find similar clips" branch is satisfied in full.
 
 ---
 
@@ -12,13 +15,15 @@ Build a small backend that lets you search a growing audio corpus by text query,
 
 | Concern | Choice |
 |---|---|
-| Primary content | English speech (transcripts shipped as gold labels) |
-| Datasets | LibriSpeech `dev-clean` (primary), FLEURS `en_us` (accent/locale variety) |
-| Stretch datasets | AudioCaps (general audio + captions) — deferred, not run |
-| Search mode | Text query → top-k clips, with audio-to-audio also wired |
+| Primary content | English read speech **and** environmental sound (mixed-content corpus) |
+| Speech corpus | LibriSpeech `dev-clean` — 200 clips, audiobook narration, shipped transcripts as gold |
+| Non-speech corpus | ESC-50 — 2 000 clips × 50 classes (`dog`, `rain`, `glass_breaking`, …); humanised class name doubles as transcript so all three rankers have signal |
+| Other adapters wired | FLEURS `en_us` (multi-accent stand-in; ingestion deferred) |
+| Stretch datasets | AudioCaps (general audio + descriptive captions) — deferred, not run |
+| Search modes | Text query → top-k clips · **Audio-to-audio** (`/search-by-audio`) → top-k clips · BM25 / FTS on transcript |
 | Eval philosophy | Transcripts ARE gold. No human labelling; no LLM-as-judge for v1. |
 
-CommonVoice was the original plan; Mozilla pulled all CV repos from HuggingFace in October 2025 and moved access to the new Mozilla Data Collective. FLEURS replaces it (multilingual + accent-tagged + still on HF).
+CommonVoice was the original speech-corpus plan; Mozilla pulled all CV repos from HuggingFace in October 2025 and moved access to the new Mozilla Data Collective. FLEURS is wired as the replacement adapter; ESC-50 was added to give CLAP a corpus where its joint audio space earns its slot.
 
 ---
 
@@ -26,7 +31,7 @@ CommonVoice was the original plan; Mozilla pulled all CV repos from HuggingFace 
 
 ```mermaid
 flowchart LR
-    DS[(LibriSpeech<br/>FLEURS<br/>HF datasets)] --> AD[DatasetAdapter<br/>iter_clips]
+    DS[(LibriSpeech<br/>ESC-50<br/>FLEURS<br/>HF datasets)] --> AD[DatasetAdapter<br/>iter_clips]
     AD --> BAT[batched sync<br/>n=32]
     BAT --> TX[bge-small-en-v1.5<br/>384 dim]
     BAT --> AU[CLAP htsat-unfused<br/>512 dim, joint text-audio]
@@ -70,10 +75,12 @@ Originally planned on Turbopuffer; pivoted to LanceDB after confirming Turbopuff
 
 | Set | n | Construction |
 |---|---|---|
-| `auto` | 100 | random clip → 3–7-word sub-phrase of its transcript → query; gold = source clip |
-| `hand` | 10 | curated paraphrase / topical / abstract queries; gold = clip id by hand |
+| `auto` | 100 | random clip from `clips_text` → 3–7-word sub-phrase of its transcript → query; gold = source clip |
+| `hand` | 20 | curated paraphrase / topical / abstract / non-speech queries; gold = clip id(s) by hand |
 
-Probes are seeded (seed=42) so re-runs are exactly comparable.
+Probes are seeded (`seed=42`) so re-runs are exactly comparable. Hand probes split: 10 LibriSpeech (substring + paraphrase + abstract semantic) + 10 ESC-50 (class-name + acoustic paraphrase like "puppy whining loudly").
+
+> **Caveat — auto-probe corpus skew.** `generate_auto_probes` filters transcripts with `<3` words. ESC-50 class names are 1-2 words, so most ESC-50 clips are dropped → 100 auto probes land 97/3 LibriSpeech/ESC-50, biasing the overall numbers toward speech. Fix tracked in [ADR 0006](docs/adr/0006-eval-transcript-as-gold.md). Read per-source numbers, not overall, when comparing corpus behaviour.
 
 ### Configs (ablation)
 
@@ -83,40 +90,45 @@ Probes are seeded (seed=42) so re-runs are exactly comparable.
 | `+audio`   | text-vec + audio-vec |
 | `+bm25`    | text-vec + audio-vec + bm25 |
 
-### Results (200-clip LibriSpeech index, 110 probes)
+### Results — 2 200-clip mixed index (LS 200 + ESC-50 2 000), 120 probes
 
 **Overall**
 
 | config | R@1 | R@5 | R@10 | MRR |
 |---|---:|---:|---:|---:|
-| baseline | **0.791** | 0.918 | 0.946 | **0.847** |
-| +audio | 0.100 | 0.500 | 0.864 | 0.262 |
-| +bm25 | 0.618 | **0.946** | **0.973** | 0.757 |
+| baseline | **0.717** | 0.825 | 0.842 | **0.759** |
+| +audio | 0.400 | 0.717 | 0.800 | 0.527 |
+| +bm25 | 0.658 | **0.875** | **0.917** | 0.750 |
 
-**Auto probes (substring queries, n=100)**
-
-| config | R@1 | R@5 | R@10 | MRR |
-|---|---:|---:|---:|---:|
-| baseline | **0.81** | 0.93 | 0.95 | **0.865** |
-| +audio | 0.09 | 0.50 | 0.86 | 0.257 |
-| +bm25 | 0.64 | **0.97** | **0.99** | 0.776 |
-
-**Hand probes (paraphrase + abstract, n=10)**
+**Per-source — LibriSpeech (n=107)**
 
 | config | R@1 | R@5 | R@10 | MRR |
 |---|---:|---:|---:|---:|
-| baseline | **0.60** | **0.80** | **0.90** | **0.662** |
-| +audio | 0.20 | 0.50 | 0.90 | 0.313 |
-| +bm25 | 0.40 | 0.70 | 0.80 | 0.567 |
+| baseline | **0.710** | 0.813 | 0.832 | **0.750** |
+| +audio | 0.364 | 0.701 | 0.794 | 0.499 |
+| +bm25 | 0.645 | **0.878** | **0.925** | 0.743 |
+
+**Per-source — ESC-50 (n=13)**
+
+| config | R@1 | R@5 | R@10 | MRR |
+|---|---:|---:|---:|---:|
+| baseline | **0.769** | **0.923** | **0.923** | **0.833** |
+| +audio | 0.692 | 0.846 | 0.846 | 0.750 |
+| +bm25 | **0.769** | 0.846 | 0.846 | 0.808 |
 
 ### Reading the table
 
-- **Text-only baseline is the single best R@1 source** on this corpus. Adding more signals via naive equal-weighted RRF hurts top-1 because the new sources disagree with the strong text signal.
-- **+audio is catastrophic for R@1** (0.81 → 0.09 on substring queries). The audio space is uncorrelated with text-substring queries — the audio rank of the gold clip is essentially random against alternates, and RRF dilutes the strong text signal.
-- **+bm25 climbs R@5 / R@10** (0.93 → 0.97 / 0.95 → 0.99) but drops R@1. BM25 over substrings is unambiguous when keywords match, but its rank-1 winner sometimes disagrees with the text-dense rank-1 winner, costing R@1.
-- **Hand probes (paraphrase) flatten everyone.** Text-dense leads (0.60) because paraphrases share semantics, not keywords (so BM25 loses); audio still drags.
+- **LibriSpeech: text-only baseline wins R@1; +audio drags from 0.71 → 0.36.** The audio space is uncorrelated with substring-style queries; equal-weight RRF dilutes the strong text signal. Adding BM25 climbs R@10 (0.83 → 0.93) at the cost of R@1.
+- **ESC-50: text-only baseline ties +bm25; +audio sits within striking distance.** The text path wins because **the class name IS the transcript** ("dog barking" → matches the literal `dog` transcript via bge + BM25), so the audio path never gets a tiebreaker turn. Importantly, +audio no longer *drags* on this corpus — that's CLAP behaving rationally on content it was trained for.
+- **The cleanest CLAP win lives in audio-to-audio, not text-to-audio fusion.** See the next section — same `clips_audio` index, no text path in the loop, 30/30 same-class retrieval.
 
-This is the headline finding the eval was built to surface: **on speech with clean transcripts, equal-weighted RRF over (text, audio, bm25) is the wrong default.** The right designs are (a) text-only, or (b) cascaded — text-dense first stage, BM25 deep-recall, audio as a *re-ranker* over a candidate set rather than a fusion partner.
+This is the richer headline the eval was built to surface: **fusion is content- and modality-dependent**.
+
+- Speech corpus + text query → text dominates, audio drags
+- Non-speech corpus + class-label transcripts → text and audio tie because the transcript pre-encodes the audio class
+- **Audio query (any corpus)** → CLAP carries the retrieval because no text path is in the loop
+
+The right production designs are: (a) text-only fusion for speech, (b) cascaded text → BM25 → CLAP re-rank for non-speech captions, (c) CLAP-only for audio queries.
 
 This is the same content-dependent split flagged in research:
 - Transcript-only retrieval reaches NDCG@10 ≈ 0.52–0.61 on podcast retrieval (TU Wien TREC Podcast 2021), so transcript-first is genuinely strong on clean speech.
@@ -135,6 +147,114 @@ $ uv run audio-search search "joining the military"
 ```
 
 Lets you tell a story per query — "audio rank 18 for this paraphrase = audio doesn't see the semantic link, only the acoustic profile."
+
+---
+
+## Audio-to-audio (`/search-by-audio`)
+
+Same `clips_audio` index, but the query is a 5-second waveform instead of a text string. CLAP's audio tower encodes the input identically to the index side, the ANN search runs in the same 512-dim joint space, and the text path is not on the critical path.
+
+```mermaid
+flowchart LR
+    A[user .wav file] --> B[soundfile.read<br/>arr + sr]
+    B --> C[CLAP audio tower<br/>htsat-unfused]
+    C --> D[L2-normalize<br/>512-dim vec]
+    D --> E[LanceDB ANN<br/>clips_audio]
+    E --> F[top-k clip ids + audio_ranks]
+    F --> G[hydrate transcript<br/>from clips_text]
+    G --> H[response]
+```
+
+### Retrieval quality (six classes × top-5 = 30 returns)
+
+| Query clip | Top-5 retrieved classes | Same-class hit |
+|---|---|---:|
+| ESC-50 / `dog` | dog · dog · dog · dog · dog | 5 / 5 |
+| ESC-50 / `rain` | rain · rain · rain · rain · rain | 5 / 5 |
+| ESC-50 / `siren` | siren · siren · siren · siren · siren | 5 / 5 |
+| ESC-50 / `glass breaking` | glass breaking × 5 | 5 / 5 |
+| ESC-50 / `crying baby` | crying baby × 5 | 5 / 5 |
+| ESC-50 / `chainsaw` | chainsaw × 5 | 5 / 5 |
+
+**30 / 30 same-class retrieval.** CLAP clusters by acoustic content, not by label; this is the joint embedding space behaving exactly as advertised.
+
+### Cross-corpus probe
+
+| Query | Top-5 sources | Reading |
+|---|---|---|
+| LibriSpeech narration clip ("where is my brother now") | 5 / 5 LibriSpeech narration clips | Clean read speech sits in its own region of CLAP's joint space — no ESC-50 pollution |
+| ESC-50 dog clip, restricted to `--source-filter=librispeech` | 5 random LS narration clips, no thematic connection to dogs | Correct failure: CLAP cannot bridge to a corpus that contains none of the target acoustic content |
+
+### Latency
+
+| Stage | Cold (first call) | Warm |
+|---|---|---|
+| CLAP model load | 5–7 s | cached |
+| Audio decode + encode (MPS) | — | 22–35 ms |
+| LanceDB ANN over 2 200 vecs | — | 22–90 ms |
+| **Total round-trip** | ~7 s | **50–120 ms** |
+
+Bottleneck is encoding, not search. LanceDB IVF-PQ + on-disk scales sub-100ms to 10⁷+ vectors.
+
+### Demo command
+
+```bash
+uv run audio-search search-by-audio data/esc50_audio/esc_1-100032-A-0.wav --k 5
+# top-5 = 5 dog clips. audio_rank 0..4. ~50 ms warm.
+```
+
+---
+
+## Live demo flow
+
+Two terminals. Server in one, CLI in the other.
+
+```bash
+# terminal 1 — long-running service (warms encoders on startup)
+uv run uvicorn audio_search.api:app --port 8000
+```
+
+```bash
+# terminal 2 — demo script, in order
+# 0. service health + index counts
+uv run audio-search health
+
+# 1. browse what's indexed
+uv run audio-search list --limit 5 --source librispeech
+uv run audio-search list --limit 5 --source esc50
+
+# 2. ORIGINAL PRD ask — text-only retrieval over speech transcripts
+#    paraphrase, no shared tokens; bge-small finds the semantic match
+uv run audio-search search "joining the military" --k 5 --sources text
+#    → ls_1988_24833_…  transcript "i've decided to enlist in the army"
+
+# 3. text query, all three sources fused — per-source ranks visible
+uv run audio-search search "joining the military" --k 5
+#    → t=0 a=18 b=2 — text wins, audio drags, BM25 helps deep recall
+
+# 4. PURE CLAP — audio query, no text path on the critical path
+uv run audio-search search-by-audio data/esc50_audio/esc_1-100032-A-0.wav --k 5
+#    → 5/5 dog clips. ~50 ms warm.
+
+# 5. consistency — different class, same behaviour
+uv run audio-search search-by-audio data/esc50_audio/esc_1-187207-A-20.wav --k 5
+#    → 5/5 crying baby clips. proves step 4 wasn't a fluke.
+
+# 6. cross-corpus separation
+uv run audio-search search-by-audio data/librispeech_audio/ls_1272_135031_1272-135031-0012.wav --k 5
+#    → 5/5 LibriSpeech narration. zero ESC-50 leak.
+
+# 7. eval (writes eval/results.json)
+uv run audio-search eval --n 100
+```
+
+**Narrative arc the demo supports:**
+
+1. Step 2 — *the original boring case still works.* PRD's core "text query → clips" satisfied via pure semantic match over transcripts.
+2. Step 3 — *fusion is observable and inspectable.* The per-source rank columns let you read in real time why one signal wins.
+3. Steps 4–5 — *PRD 4th-requirement "OR" branch satisfied.* Audio-to-audio is not just wired, it's clean. 10/10 hits across two classes.
+4. Step 6 — *the system understands corpus separation.* CLAP doesn't mix speech and environmental sound; that's not luck, it's the joint space being well-formed.
+5. Step 7 — *honest numbers, no cherry-picking.* The eval table tells the design-tradeoff story (content-dependent fusion) directly.
 
 ---
 
@@ -277,13 +397,15 @@ Nine ADRs in `docs/adr/`. One-liner per:
 
 ## Tradeoffs made for time
 
-- **No CommonVoice.** Mozilla pulled HF repos Oct 2025; FLEURS used as the multi-accent stand-in. CV access via Mozilla Data Collective is a stretch.
+- **No CommonVoice.** Mozilla pulled HF repos Oct 2025; FLEURS is wired as the multi-accent stand-in but FLEURS ingestion itself is deferred. CV access via Mozilla Data Collective is a separate stretch.
 - **No Whisper-in-the-loop.** Shipped transcripts only. WER on dev-clean is ~2 %; retrieval results would be unchanged.
-- **Equal-weighted RRF.** Eval shows it loses to text-only on this corpus. Did not implement weighted RRF or cascaded re-ranking — that needs labelled tuning data or a cross-encoder, both out-of-scope for a day. The eval **table makes this an explicit lesson** rather than a hidden bug.
+- **Equal-weighted RRF.** Eval shows it loses to text-only on speech and ties on non-speech with class-name transcripts. Did not implement weighted RRF or cascaded re-ranking — that needs labelled tuning data or a cross-encoder, both out-of-scope for a day. The eval **table makes this an explicit lesson** rather than a hidden bug.
+- **ESC-50 transcripts = class names.** Lets all three rankers fire on class queries, but means we can't isolate CLAP's text-to-audio contribution from bge / BM25 via this corpus (the text path always wins). The "ablate transcripts" experiment in [ADR 0009](docs/adr/0009-stretch-and-future-work.md) would clean this up; deferred. Audio-to-audio already provides a CLAP-only path, so the demo is not blocked.
 - **No drift / online eval.** Probe set is offline only; no continuous monitor.
-- **No AudioCaps.** Deferred per gating decision in [ADR 0009](docs/adr/0009-stretch-and-future-work.md); audio-to-audio shipped from day 1 because it's ~20 LOC against the same `clips_audio` table.
+- **No AudioCaps.** Deferred per gating decision in [ADR 0009](docs/adr/0009-stretch-and-future-work.md); audio-to-audio is verified end-to-end (30/30 same-class) against ESC-50, so the "find similar clip" branch of the PRD is satisfied.
 - **No web UI.** CLI + curl is the demo surface; HTTP contract is documented so a UI can plug in.
 - **No reranker.** Cohere Rerank / `bge-reranker-base` were considered ([ADR 0009](docs/adr/0009-stretch-and-future-work.md)). On 6–10-word transcripts the cross-encoder edge collapses; deferred.
+- **Auto-probe word-count filter biases corpus mix.** `generate_auto_probes` drops transcripts with `<3` words, so ESC-50 class-name transcripts are almost entirely excluded from the 100 auto probes. Per-source numbers (used above) are still fair; overall numbers tilt toward LibriSpeech. Fix tracked in [ADR 0006](docs/adr/0006-eval-transcript-as-gold.md).
 
 ---
 
@@ -351,7 +473,9 @@ uv run uvicorn audio_search.api:app --port 8000
 
 # ingest, search, eval (terminal 2 — every CLI call hits the service over :8000)
 uv run audio-search ingest --dataset librispeech --limit 200
+uv run audio-search ingest --dataset esc50 --limit 2000
 uv run audio-search search "joining the military" --k 5
+uv run audio-search search-by-audio data/esc50_audio/esc_1-100032-A-0.wav --k 5
 uv run audio-search eval --n 100
 ```
 
@@ -375,17 +499,17 @@ audio-search/
 ├── docs/adr/                          # 9 ADRs
 ├── src/audio_search/
 │   ├── config.py                      # pydantic-settings, device auto-detect
-│   ├── adapters/                      # base.py + librispeech.py + fleurs.py
+│   ├── adapters/                      # base.py + librispeech.py + esc50.py + fleurs.py
 │   ├── embed.py                       # 3 encoder calls, memoized
 │   ├── index.py                       # LanceDB wrapper (2 tables, native FTS)
-│   ├── search.py                      # parallel 3-source + RRF
+│   ├── search.py                      # parallel 3-source + RRF + audio-to-audio
 │   ├── ingest.py                      # batched sync + checkpoint
 │   ├── eval.py                        # probe gen + Recall@k + MRR
 │   ├── api.py                         # FastAPI
 │   └── cli.py                         # Typer + Rich
 ├── tests/test_rrf.py
 ├── eval/
-│   ├── hand_probes.json               # 10 curated paraphrase / topical probes
+│   ├── hand_probes.json               # 20 curated probes (10 LibriSpeech + 10 ESC-50)
 │   └── results.json                   # persisted ablation table
-└── data/                              # git-ignored: lancedb + audio cache
+└── data/                              # git-ignored: lancedb + audio cache (librispeech_audio/, esc50_audio/)
 ```
